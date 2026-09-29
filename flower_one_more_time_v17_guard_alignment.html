@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>One More Time — 花與巡邏 Prototype v11</title>
+<style>
+html,body{margin:0;height:100%;background:#101310;color:#eee;font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;overflow:hidden}
+#wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px}
+#hud{width:min(920px,96vw);display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;font-size:14px}
+canvas{background:#20271f;border:1px solid #555;max-width:96vw;max-height:82vh;image-rendering:pixelated}
+kbd{background:#333;border:1px solid #555;border-radius:4px;padding:1px 5px}.red{color:#ff7979}.blue{color:#7da9ff}.white{color:#eee}.good{color:#9be28f}.muted{color:#aaa}
+#dump{display:none;position:fixed;top:8px;left:8px;width:min(640px,90vw);height:320px;z-index:20;background:#111;color:#9be28f;font:12px/1.4 monospace;border:1px solid #6aa86a;padding:8px;white-space:pre;resize:both}
+</style></head>
+<body><div id="wrap"><div id="hud"><div id="status"></div><div id="help"></div></div><canvas id="game" width="920" height="580"></canvas></div><textarea id="dump" readonly spellcheck="false"></textarea>
+<script>
+const c=document.getElementById('game'),ctx=c.getContext('2d'),W=c.width,H=c.height;
+const statusEl=document.getElementById('status'),helpEl=document.getElementById('help'),keys={};
+const dumpEl=document.getElementById('dump');
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();
+ if(document.activeElement===dumpEl){if(k==='escape'||k==='o')toggleDump();return;}
+ keys[k]=true;if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(k))e.preventDefault();
+ if(k==='r')restartAll();
+ if(k==='p'){editMode=!editMode;drag=null;message=editMode?'編輯模式：拖曳圓點移動座標，按 O 匯出、P 離開。':'離開編輯模式。';msgT=2;}
+ if(k==='o'&&editMode)toggleDump();
+});
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+function toCanvas(e){const r=c.getBoundingClientRect();return{x:(e.clientX-r.left)*(W/r.width),y:(e.clientY-r.top)*(H/r.height)};}
+function activeWallIndex(){
+ if(drag&&drag.wallIndex!==undefined)return drag.wallIndex;
+ if(!lastMouse)return -1;
+ let bi=-1,bd=40;
+ walls.forEach((w,i)=>{const d=Math.hypot(w.x+w.w/2-lastMouse.x,w.y+w.h/2-lastMouse.y);if(d<bd){bd=d;bi=i;}});
+ return bi;
+}
+function handles(){const hs=[];
+ const aw=activeWallIndex();
+ walls.forEach((w,i)=>{
+  hs.push({x:w.x+w.w/2,y:w.y+w.h/2,r:6,col:'#8fd1ff',wallIndex:i,set:(nx,ny)=>{w.x=nx-w.w/2;w.y=ny-w.h/2;}});
+  if(i===aw){
+   hs.push({x:w.x,y:w.y,r:5,col:'#fff',wallIndex:i,set:(nx,ny)=>{w.w+=w.x-nx;w.h+=w.y-ny;w.x=nx;w.y=ny;}});
+   hs.push({x:w.x+w.w,y:w.y+w.h,r:5,col:'#fff',wallIndex:i,set:(nx,ny)=>{w.w=nx-w.x;w.h=ny-w.y;}});
+  }
+ });
+ patrolBase.forEach((p,ci)=>p.path.forEach((pt,pi)=>{
+  hs.push({x:pt.x,y:pt.y,r:7,col:'#ffd166',set:(nx,ny)=>{pt.x=nx;pt.y=ny;if(creatures[ci]&&creatures[ci].path[pi]){creatures[ci].path[pi].x=nx;creatures[ci].path[pi].y=ny;}}});
+ }));
+ flowersBase.forEach((f,i)=>{
+  hs.push({x:f.x,y:f.y,r:7,col:f.t==='red'?'#ff7979':f.t==='blue'?'#7da9ff':'#fff',set:(nx,ny)=>{f.x=nx;f.y=ny;if(flowers[i]){flowers[i].x=nx;flowers[i].y=ny;}}});
+ });
+ hs.push({x:start.x,y:start.y,r:7,col:'#9be28f',set:(nx,ny)=>{start.x=nx;start.y=ny;}});
+ hs.push({x:exit.x+exit.w/2,y:exit.y+exit.h/2,r:6,col:'#9be28f',set:(nx,ny)=>{exit.x=nx-exit.w/2;exit.y=ny-exit.h/2;}});
+ hs.push({x:exit.x+exit.w,y:exit.y+exit.h,r:5,col:'#fff',set:(nx,ny)=>{exit.w=nx-exit.x;exit.h=ny-exit.y;}});
+ return hs;
+}
+function fmtNum(n){return Math.round(n*100)/100;}
+function dumpCode(){
+ const w=walls.map(o=>`{x:${fmtNum(o.x)},y:${fmtNum(o.y)},w:${fmtNum(o.w)},h:${fmtNum(o.h)}}`).join(',\n');
+ const fl=flowersBase.map(o=>`{x:${fmtNum(o.x)},y:${fmtNum(o.y)},t:'${o.t}'${o.special?',special:true':''}}`).join(',\n');
+ const pt=patrolBase.map(p=>`{path:[${p.path.map(q=>`{x:${fmtNum(q.x)},y:${fmtNum(q.y)}}`).join(',')}],speed:${p.speed}}`).join(',\n');
+ return `const walls=[\n${w}\n];\n\nconst flowersBase=[\n${fl}\n];\n\nconst patrolBase=[\n${pt}\n];\n\nconst start={x:${fmtNum(start.x)},y:${fmtNum(start.y)}},exit={x:${fmtNum(exit.x)},y:${fmtNum(exit.y)},w:${fmtNum(exit.w)},h:${fmtNum(exit.h)}};;`;
+}
+function toggleDump(){if(dumpEl.style.display==='block'){dumpEl.style.display='none';}else{dumpEl.value=dumpCode();dumpEl.style.display='block';dumpEl.focus();dumpEl.select();}}
+let lastMouse=null;
+c.addEventListener('mousedown',e=>{if(!editMode)return;const m=toCanvas(e);lastMouse=m;let best=null,bd=1e9;handles().forEach(h=>{const d=Math.hypot(h.x-m.x,h.y-m.y);if(d<h.r+6&&d<bd){bd=d;best=h;}});drag=best;});
+addEventListener('mousemove',e=>{if(!editMode)return;lastMouse=toCanvas(e);if(drag)drag.set(lastMouse.x,lastMouse.y);});
+addEventListener('mouseup',()=>drag=null);
+const start={x:70,y:510},exit={x:842,y:505,w:48,h:36};
+const WHITE_NEED=4,ABILITY_RADIUS=120,EFFECT_TIME=2.0,ABILITY_COOLDOWN=2.0,GUIDE_MIN_SHIFT=34,GRID=20;
+// 右下窄口內視為出口引導區：進入後停止 A–E 遊蕩，但仍需玩家把目標實際帶進 EXIT。
+const exitGuideZone={x:685,y:416,w:210,h:139};
+const walls=[
+{x:0,y:0,w:920,h:25},{x:0,y:555,w:920,h:25},{x:0,y:0,w:25,h:580},{x:895,y:0,w:25,h:580},
+{x:253,y:100,w:28,h:136},
+{x:157,y:383,w:28,h:172},
+{x:152,y:236,w:129,h:28},
+{x:281,y:236,w:126,h:28},
+{x:519,y:154,w:76,h:28},
+{x:185,y:426,w:90,h:28},
+{x:553,y:412,w:104,h:28},
+{x:595,y:93,w:28,h:140},
+{x:657,y:346,w:28,h:150},
+{x:595,y:233,w:145,h:28},
+{x:753,y:388,w:105,h:28}
+];
+const flowersBase=[
+{x:410.11,y:116.6,t:'white'},
+{x:336.27,y:300.96,t:'white'},
+{x:460,y:352.78,t:'white'},
+{x:419.09,y:484.33,t:'white'},
+{x:110,y:120,t:'red',special:true},
+{x:738,y:132,t:'blue',special:true}
+];
+const patrolBase=[
+{path:[{x:65,y:85},{x:145,y:85},{x:145,y:175},{x:65,y:175}],speed:80},
+{path:[{x:225,y:294},{x:563,y:294},{x:563,y:387},{x:225,y:387}],speed:82},
+{path:[{x:650,y:40},{x:825,y:40},{x:825,y:208},{x:650,y:208}],speed:78}
+];
+// 第二輪目標角色活動點：A/B/C/D 採用白花標記座標，E 為中央停留點。
+const targetRoamPoints=[
+ {x:145.68,y:135.03}, // A 紅花區
+ {x:737.4,y:128.06},  // B 藍花區
+ {x:410.11,y:155.96}, // C 上方中央
+ {x:303.34,y:506.75}, // D 下方
+ {x:405,y:340}        // E 中央
+];
+// 限制式隨機遊蕩圖：避免 D 與 B 直接跨區，降低自然靠近 EXIT 的機率。
+const targetRoamLinks=[
+ [2,3],     // A -> C, D
+ [2,4],     // B -> C, E
+ [0,1,4],   // C -> A, B, E
+ [0,4],     // D -> A, E
+ [1,2,3]    // E -> B, C, D
+];
+let round=1,player,flowers,creatures,whiteCount=0,choice=null,ability=null,targetAtExit=false,finished=false,message='',msgT=0,queueMsg=null,queueMsgT=0,lastE=false,pulseT=0,abilityCooldownT=0,editMode=false,drag=null,target=null;
+function rectCircle(rect,x,y,r){const nx=Math.max(rect.x,Math.min(x,rect.x+rect.w)),ny=Math.max(rect.y,Math.min(y,rect.y+rect.h));return (x-nx)**2+(y-ny)**2<r*r}
+function blocked(x,y,r){return walls.some(w=>rectCircle(w,x,y,r));}
+function norm(dx,dy){const l=Math.hypot(dx,dy)||1;return[dx/l,dy/l];}
+function resetRound(){
+ player={x:start.x,y:start.y,r:11,speed:178};whiteCount=0;targetAtExit=false;finished=false;pulseT=0;abilityCooldownT=0;
+ flowers=flowersBase.map(f=>({...f,taken:false,disabled:round===2}));
+ creatures=patrolBase.map((p,i)=>({x:p.path[0].x,y:p.path[0].y,r:13,path:p.path.map(q=>({...q})),pi:1,speed:p.speed,state:'patrol',effectT:0,target:null,guardIndex:i,interfering:false}));
+ if(round===2){
+  // 舊中央守衛移除；左右兩隻守衛維持第一輪巡邏，先單獨測試尋人／引導玩法。
+  creatures.splice(1,1);
+  const first=targetRoamPoints[0];
+  target={x:first.x,y:first.y,r:13,speed:72,state:'roam',roamIndex:0,pauseT:1.2,effectT:0,moveTarget:null,route:null,routeStep:0,guideStart:null,guideHintT:0};
+ }else target=null;
+ message=round===1?'第一輪：收集 4 朵白花，並在離開前選擇紅花或藍花。':'第二輪：還是沒找到她……帶著這朵花，再找一次吧。';msgT=5;
+}
+function restartAll(){round=1;choice=null;ability=null;resetRound();}
+function movePlayer(dx,dy,dt){let l=Math.hypot(dx,dy);if(!l)return;if(l>1){dx/=l;dy/=l;}const nx=player.x+dx*player.speed*dt,ny=player.y+dy*player.speed*dt;if(!blocked(nx,player.y,player.r))player.x=nx;if(!blocked(player.x,ny,player.r))player.y=ny;}
+function nearestPatrolPoint(cr){let b=null,d=1e9;cr.path.forEach((p,i)=>{const nd=Math.hypot(cr.x-p.x,cr.y-p.y);if(nd<d){d=nd;b={...p,index:i}}});return b;}
+function center(cx,cy){return{x:cx*GRID+GRID/2,y:cy*GRID+GRID/2}}
+function valid(cx,cy,r=15){const p=center(cx,cy);return p.x>r&&p.x<W-r&&p.y>r&&p.y<H-r&&!blocked(p.x,p.y,r)}
+function findPath(sx,sy,tx,ty,r=15){
+ const s={x:Math.floor(sx/GRID),y:Math.floor(sy/GRID)},t={x:Math.floor(tx/GRID),y:Math.floor(ty/GRID)},K=(x,y)=>x+','+y;
+ const open=[s],came=new Map(),g=new Map([[K(s.x,s.y),0]]),dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+ while(open.length){let bi=0,bf=1e9;for(let i=0;i<open.length;i++){const n=open[i],f=(g.get(K(n.x,n.y))??1e9)+Math.abs(n.x-t.x)+Math.abs(n.y-t.y);if(f<bf){bf=f;bi=i}}
+ const cur=open.splice(bi,1)[0],ck=K(cur.x,cur.y);if(cur.x===t.x&&cur.y===t.y){let out=[],n=cur,k=ck;while(k!==K(s.x,s.y)){out.push(center(n.x,n.y));const pr=came.get(k);if(!pr)break;n=pr;k=K(n.x,n.y)}out.reverse();out.push({x:tx,y:ty});return out;}
+ for(const[dX,dY]of dirs){const nx=cur.x+dX,ny=cur.y+dY,nk=K(nx,ny);if(!valid(nx,ny,r))continue;const ng=(g.get(ck)??1e9)+1;if(ng<(g.get(nk)??1e9)){came.set(nk,cur);g.set(nk,ng);if(!open.some(n=>n.x===nx&&n.y===ny))open.push({x:nx,y:ny})}}}
+ return[{x:tx,y:ty}];
+}
+function beginReturn(cr){const p=nearestPatrolPoint(cr);cr.state='return';cr.returnIndex=p.index;cr.returnPath=findPath(cr.x,cr.y,p.x,p.y,cr.r+2);cr.returnStep=0;}
+function distToPatrol(cr){
+ let best=1e9;
+ for(let i=0;i<cr.path.length;i++){
+  const a=cr.path[i],b=cr.path[(i+1)%cr.path.length],vx=b.x-a.x,vy=b.y-a.y,wx=cr.x-a.x,wy=cr.y-a.y;
+  const vv=vx*vx+vy*vy||1,t=Math.max(0,Math.min(1,(wx*vx+wy*vy)/vv)),px=a.x+t*vx,py=a.y+t*vy;
+  best=Math.min(best,Math.hypot(cr.x-px,cr.y-py));
+ }
+ return best;
+}
+function updateInterference(){
+ if(round!==2||goalDone||creatures.length<3)return;
+ const mid=creatures[1],off=distToPatrol(mid)>32||mid.state==='affected'||mid.state==='return';
+ for(const i of [0,2]){
+  const g=creatures[i];
+  if(g.state==='affected'||g.state==='captured')continue; // 玩家仍可用能力處理干擾守衛
+  if(off&&Math.hypot(g.x-mid.x,g.y-mid.y)<230){
+   if(g.state!=='interfere'){message=(i===0?'紅花守衛':'藍花守衛')+'察覺到中央守衛脫離路線，衝過來干擾了！';msgT=1.6;}
+   g.state='interfere';g.interfering=true;g.target={x:mid.x,y:mid.y};
+  }else if(g.state==='interfere'){
+   g.interfering=false;beginReturn(g);
+  }
+  if(g.state==='interfere'){
+   g.target={x:mid.x,y:mid.y};
+   if(Math.hypot(g.x-mid.x,g.y-mid.y)<g.r+mid.r+7){
+    beginReturn(mid);g.interfering=false;beginReturn(g);
+    message='干擾守衛碰到了中央守衛，把牠趕回巡邏區！';msgT=1.8;
+   }
+  }
+ }
+}
+function updateCreature(cr,dt){let tx,ty;if(cr.state==='affected'){cr.effectT-=dt;tx=cr.target.x;ty=cr.target.y;if(cr.effectT<=0)beginReturn(cr)}
+ if(cr.state==='interfere'){tx=cr.target.x;ty=cr.target.y;}
+ if(cr.state==='return'){if(!cr.returnPath||cr.returnStep>=cr.returnPath.length){cr.pi=(cr.returnIndex+1)%cr.path.length;cr.state='patrol'}else{let p=cr.returnPath[cr.returnStep];tx=p.x;ty=p.y;if(Math.hypot(cr.x-tx,cr.y-ty)<7){cr.returnStep++;if(cr.returnStep>=cr.returnPath.length){const h=cr.path[cr.returnIndex];cr.x=h.x;cr.y=h.y;cr.pi=(cr.returnIndex+1)%cr.path.length;cr.state='patrol'}else{p=cr.returnPath[cr.returnStep];tx=p.x;ty=p.y}}}}
+ if(cr.state==='patrol'){let p=cr.path[cr.pi];tx=p.x;ty=p.y;if(Math.hypot(cr.x-tx,cr.y-ty)<7){cr.pi=(cr.pi+1)%cr.path.length;p=cr.path[cr.pi];tx=p.x;ty=p.y}}
+ if(tx===undefined)return;const[nx,ny]=norm(tx-cr.x,ty-cr.y),step=cr.speed*dt;if(!blocked(cr.x+nx*step,cr.y,cr.r))cr.x+=nx*step;if(!blocked(cr.x,cr.y+ny*step,cr.r))cr.y+=ny*step;
+}
+function fail(){player.x=start.x;player.y=start.y;message='碰到生物了！回到起點；已完成的收集保留。';msgT=2;}
+function useAbility(){if(round!==2||!ability||abilityCooldownT>0||target?.state==='affected')return;pulseT=.32;let hit=0;
+ if(target&&!targetAtExit&&Math.hypot(target.x-player.x,target.y-player.y)<=ABILITY_RADIUS){
+  hit=1;target.state='affected';target.effectT=EFFECT_TIME;target.guideStart={x:target.x,y:target.y};target.route=null;
+  if(ability==='attract')target.moveTarget={x:player.x,y:player.y};
+  else{const[nx,ny]=norm(target.x-player.x,target.y-player.y);target.moveTarget={x:target.x+nx*150,y:target.y+ny*150};}
+ }
+ message=hit?(ability==='attract'?'目標被吸引過來了。':'目標被驅趕開了。'):'能力範圍內沒有目標。';msgT=1.1;}
+
+function pointInRect(p,r){return p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h;}
+function chooseTargetRoam(){
+ const options=targetRoamLinks[target.roamIndex]||[];
+ if(!options.length)return;
+ const next=options[Math.floor(Math.random()*options.length)];
+ setTargetRoamDestination(next);
+}
+function setTargetRoamDestination(next){
+ target.roamIndex=next;const dest=targetRoamPoints[next];
+ target.route=findPath(target.x,target.y,dest.x,dest.y,target.r+2);target.routeStep=0;target.moveTarget=null;
+}
+function chooseRoamFromGuidance(dx,dy,shift){
+ // 玩家造成的位移先決定「合理方向」，隨機只發生在合理候選之間。
+ const dl=Math.hypot(dx,dy)||1,ux=dx/dl,uy=dy/dl;
+ let candidates=[];
+ for(let i=0;i<targetRoamPoints.length;i++){
+  const p=targetRoamPoints[i],vx=p.x-target.x,vy=p.y-target.y,vl=Math.hypot(vx,vy);
+  if(vl<24)continue;
+  const align=(vx/vl)*ux+(vy/vl)*uy;
+  if(align>0.18)candidates.push({i,align,dist:vl});
+ }
+ if(!candidates.length)return false;
+ candidates.sort((a,b)=>b.align-a.align);
+ // 強引導時候選更集中；剛過門檻時保留較多自主性。
+ const keep=shift>70?Math.min(2,candidates.length):Math.min(3,candidates.length);
+ candidates=candidates.slice(0,keep);
+ // 方向越吻合權重越高，但不固定選最高分。
+ const weights=candidates.map(c=>Math.max(.05,(c.align-.12)**2));
+ let roll=Math.random()*weights.reduce((a,b)=>a+b,0),pick=candidates[0];
+ for(let i=0;i<candidates.length;i++){roll-=weights[i];if(roll<=0){pick=candidates[i];break;}}
+ setTargetRoamDestination(pick.i);target.pauseT=.45;target.guideHintT=1.0;
+ return true;
+}
+function finishTargetEffect(){
+ const gs=target.guideStart,dx=gs?target.x-gs.x:0,dy=gs?target.y-gs.y:0,shift=Math.hypot(dx,dy);
+ target.guideStart=null;target.moveTarget=null;target.route=null;abilityCooldownT=ABILITY_COOLDOWN;
+ if(pointInRect(target,exitGuideZone)){
+  target.state='exitWait';target.pauseT=.8;target.guideHintT=1.0;
+  message='她進入出口區了；再用能力把她引導進 EXIT。';msgT=1.8;return;
+ }
+ target.state='roam';
+ if(shift>=GUIDE_MIN_SHIFT&&chooseRoamFromGuidance(dx,dy,shift)){
+  message='引導改變了她接下來的方向。';msgT=1.1;
+ }else{
+  target.pauseT=.35;target.guideHintT=.55;
+  message='這次位移不足以改變她的遊蕩方向。';msgT=1.0;
+ }
+}
+function updateTarget(dt){
+ if(round!==2||!target||targetAtExit)return;
+ if(target.guideHintT>0)target.guideHintT-=dt;
+ if(target.state==='affected'){
+  target.effectT-=dt;
+  if(target.effectT<=0)finishTargetEffect();
+ }
+ if(target.state==='exitWait'){
+  if(target.pauseT>0)target.pauseT-=dt;
+  return;
+ }
+ if(target.state==='roam'){
+  // 若自主移動意外進入窄口，立即停止遊蕩，不會自己走進 EXIT。
+  if(pointInRect(target,exitGuideZone)){
+   target.state='exitWait';target.route=null;target.moveTarget=null;target.pauseT=.8;return;
+  }
+  if(target.pauseT>0){target.pauseT-=dt;return;}
+  if(!target.route||target.routeStep>=target.route.length)chooseTargetRoam();
+  target.moveTarget=target.route[target.routeStep];
+ }
+ const t=target.moveTarget;if(!t)return;
+ const d=Math.hypot(target.x-t.x,target.y-t.y);
+ if(d<8){
+  if(target.state==='roam'){
+   target.routeStep++;
+   if(target.routeStep>=target.route.length){target.route=null;target.moveTarget=null;target.pauseT=.8+Math.random()*1.4;}
+  }
+  return;
+ }
+ const[nx,ny]=norm(t.x-target.x,t.y-target.y),step=target.speed*dt;
+ if(!blocked(target.x+nx*step,target.y,target.r))target.x+=nx*step;
+ if(!blocked(target.x,target.y+ny*step,target.r))target.y+=ny*step;
+}
+
+function collectFlowers(){for(const f of flowers){if(f.taken||f.disabled||Math.hypot(player.x-f.x,player.y-f.y)>=22)continue;if(f.t==='white'){f.taken=true;whiteCount++;message=`白花 ${whiteCount}/${WHITE_NEED}`;msgT=.8;}
+ else if(round===1&&!choice){choice=f.t;ability=choice==='red'?'attract':'repel';f.taken=true;flowers.forEach(o=>{if(o.special&&!o.taken)o.disabled=true});message=choice==='red'?'選擇紅花：下一輪獲得「吸引」。':'選擇藍花：下一輪獲得「驅趕」。';msgT=2.5;}}}
+function exitReady(){return round===1?whiteCount>=WHITE_NEED&&!!choice:targetAtExit;}
+function update(dt){if(finished||editMode)return;const dx=(keys.d||keys.arrowright?1:0)-(keys.a||keys.arrowleft?1:0),dy=(keys.s||keys.arrowdown?1:0)-(keys.w||keys.arrowup?1:0);movePlayer(dx,dy,dt);const e=!!keys.e;if(e&&!lastE)useAbility();lastE=e;if(pulseT>0)pulseT-=dt;if(abilityCooldownT>0)abilityCooldownT=Math.max(0,abilityCooldownT-dt);creatures.forEach(cr=>updateCreature(cr,dt));updateTarget(dt);collectFlowers();
+ if(round===2&&!targetAtExit&&target){
+  const tx=Math.max(exit.x,Math.min(target.x,exit.x+exit.w)),ty=Math.max(exit.y,Math.min(target.y,exit.y+exit.h));
+  if(Math.hypot(target.x-tx,target.y-ty)<target.r+6){
+   targetAtExit=true;target.state='arrived';target.moveTarget=null;target.route=null;
+   message='她已經到出口了！你也前往 EXIT，一起離開。';msgT=3;
+  }
+ }
+ for(const cr of creatures){if(Math.hypot(player.x-cr.x,player.y-cr.y)<player.r+cr.r+2){fail();break;}}
+ if(player.x>exit.x-8&&player.x<exit.x+exit.w+8&&player.y>exit.y-8&&player.y<exit.y+exit.h+8){if(exitReady()){if(round===1){round=2;resetRound();message=`ONE MORE TIME — 還是沒找到她。你帶走了${choice==='red'?'紅花：吸引':'藍花：驅趕'}，再找一次吧。`;msgT=5;queueMsg=null;}else{finished=true;message='完成！第一次沒有找到她；第二次利用取得的能力成功把她帶回來。按 R 重玩並選另一朵特殊花。';msgT=999}}else{message=round===1?(whiteCount<WHITE_NEED?`還需要 ${WHITE_NEED-whiteCount} 朵白花。`:'離開前必須選擇紅花或藍花。'):(targetAtExit?'她在出口等你。你也前往 EXIT。':'找到她，並一起前往 EXIT。');msgT=1.2}}
+ if(msgT>0){msgT-=dt;if(msgT<=0&&queueMsg){message=queueMsg;msgT=queueMsgT;queueMsg=null;}}}
+function circle(x,y,r,fill){ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fillStyle=fill;ctx.fill()}
+function drawFlower(f){if(f.disabled)return;const col=f.t==='red'?'#ed6262':f.t==='blue'?'#6596ed':'#f1f0df';circle(f.x,f.y,f.special?9:7,col);ctx.strokeStyle='#7ba36d';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(f.x,f.y+6);ctx.lineTo(f.x,f.y+16);ctx.stroke();if(f.special){ctx.strokeStyle='rgba(255,255,255,.45)';ctx.lineWidth=1;ctx.beginPath();ctx.arc(f.x,f.y,15,0,Math.PI*2);ctx.stroke()}}
+function draw(){ctx.clearRect(0,0,W,H);ctx.fillStyle='#20271f';ctx.fillRect(0,0,W,H);ctx.fillStyle='#4b5349';walls.forEach(w=>ctx.fillRect(w.x,w.y,w.w,w.h));
+ if(round===2){ctx.save();ctx.strokeStyle='rgba(155,226,143,.16)';ctx.setLineDash([5,7]);ctx.strokeRect(exitGuideZone.x,exitGuideZone.y,exitGuideZone.w,exitGuideZone.h);ctx.restore();}
+ ctx.fillStyle=exitReady()?'#6aa86a':'#555';ctx.fillRect(exit.x,exit.y,exit.w,exit.h);ctx.fillStyle='#eee';ctx.font='12px system-ui';ctx.fillText('EXIT',exit.x+8,exit.y+23);
+ flowers.filter(f=>!f.taken).forEach(drawFlower);
+ ctx.save();ctx.strokeStyle='rgba(255,255,255,.13)';ctx.setLineDash([5,6]);creatures.forEach(cr=>{ctx.beginPath();cr.path.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.closePath();ctx.stroke()});ctx.restore();
+ if(round===2){ctx.save();const ready=abilityCooldownT<=0;ctx.strokeStyle=ability==='attract'?(ready?'rgba(255,105,105,.34)':'rgba(255,105,105,.08)'):(ready?'rgba(105,155,255,.34)':'rgba(105,155,255,.08)');ctx.setLineDash([7,7]);ctx.lineWidth=ready?2:1;ctx.beginPath();ctx.arc(player.x,player.y,ABILITY_RADIUS,0,Math.PI*2);ctx.stroke();ctx.restore()}
+ if(pulseT>0){ctx.strokeStyle=ability==='attract'?'rgba(255,105,105,.9)':'rgba(105,155,255,.9)';ctx.lineWidth=4;ctx.beginPath();ctx.arc(player.x,player.y,ABILITY_RADIUS,0,Math.PI*2);ctx.stroke()}
+ creatures.forEach((cr,i)=>{circle(cr.x,cr.y,cr.r,cr.state==='affected'?'#f1a866':cr.state==='return'?'#d8d184':'#e5cf69');circle(cr.x-4,cr.y-2,2,'#222');circle(cr.x+4,cr.y-2,2,'#222')});if(round===2&&target){circle(target.x,target.y,target.r,target.state==='affected'?'#f1a866':target.state==='exitWait'?'#caa0dc':'#d98bd8');ctx.beginPath();ctx.arc(target.x,target.y,target.r+5,0,Math.PI*2);ctx.strokeStyle='#f0b6ef';ctx.lineWidth=2;ctx.stroke();if(target.guideHintT>0){ctx.beginPath();ctx.arc(target.x,target.y,target.r+11,0,Math.PI*2);ctx.strokeStyle='rgba(255,235,130,.9)';ctx.lineWidth=3;ctx.stroke();}circle(target.x-4,target.y-2,2,'#222');circle(target.x+4,target.y-2,2,'#222');}circle(player.x,player.y,player.r,'#f4f4f4');
+ if(editMode){const aw=activeWallIndex();
+  walls.forEach((w,i)=>{ctx.strokeStyle=i===aw?'#ffe27a':'rgba(143,209,255,.55)';ctx.lineWidth=i===aw?3:1.5;ctx.strokeRect(w.x+.5,w.y+.5,w.w-1,w.h-1);});
+  handles().forEach(h=>{ctx.beginPath();ctx.arc(h.x,h.y,h.r,0,Math.PI*2);ctx.globalAlpha=.9;ctx.fillStyle=h.col;ctx.fill();ctx.globalAlpha=1;ctx.strokeStyle='#000';ctx.lineWidth=1;ctx.stroke();});
+  ctx.textAlign='center';ctx.font='bold 11px system-ui';
+  walls.forEach((w,i)=>{ctx.fillStyle='#04210f';ctx.fillText(i,w.x+w.w/2,w.y+w.h/2+4);});
+  ctx.font='9px system-ui';
+  patrolBase.forEach((p,ci)=>p.path.forEach((pt,pi)=>{ctx.fillStyle='#000';ctx.fillText(`${ci}-${pi}`,pt.x,pt.y+3);}));
+  ctx.textAlign='left';
+  ctx.fillStyle='#9be28f';ctx.font='13px system-ui';ctx.fillText('編輯模式 (P 結束／O 匯出)　數字＝牆編號　移到牆中心會亮起並顯示縮放角點',20,45);
+  if(aw>=0){const w=walls[aw];ctx.fillStyle='#ffe27a';ctx.font='12px system-ui';ctx.fillText(`牆 #${aw}　x:${Math.round(w.x)} y:${Math.round(w.y)} w:${Math.round(w.w)} h:${Math.round(w.h)}`,20,64);}
+  if(drag&&lastMouse){ctx.fillStyle='#fff';ctx.font='12px system-ui';ctx.fillText(`${Math.round(lastMouse.x)}, ${Math.round(lastMouse.y)}`,lastMouse.x+10,lastMouse.y-10);}
+ }
+ if(msgT>0){ctx.fillStyle='rgba(0,0,0,.72)';ctx.fillRect(115,12,690,44);ctx.fillStyle='#fff';ctx.textAlign='center';ctx.font='16px system-ui';ctx.fillText(message,460,40);ctx.textAlign='left'}
+ const pick=choice?(choice==='red'?'<span class="red">紅花／吸引</span>':'<span class="blue">藍花／驅趕</span>'):'尚未選擇';statusEl.innerHTML=round===1?`第 <b>1</b> 輪　<span class="white">白花 ${whiteCount}/${WHITE_NEED}</span>　特殊花：${pick}`:`第 <b>2</b> 輪　特殊花：${pick}　目標：${targetAtExit?'<span class="good">已到 EXIT</span>':'一起前往 EXIT'}`;helpEl.innerHTML=`<kbd>WASD</kbd> 移動　${round===2?'<kbd>E</kbd> 能力　':''}<kbd>R</kbd> 全部重來　<kbd>P</kbd> 編輯座標`;
+}
+let last=performance.now();function loop(t){const dt=Math.min(.033,(t-last)/1000);last=t;update(dt);draw();requestAnimationFrame(loop)}resetRound();requestAnimationFrame(loop);
+</script></body></html>
