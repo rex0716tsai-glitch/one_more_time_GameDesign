@@ -57,7 +57,7 @@ function dumpCode(){
  const w=walls.map(o=>`{x:${fmtNum(o.x)},y:${fmtNum(o.y)},w:${fmtNum(o.w)},h:${fmtNum(o.h)}}`).join(',\n');
  const fl=flowersBase.map(o=>`{x:${fmtNum(o.x)},y:${fmtNum(o.y)},t:'${o.t}'${o.special?',special:true':''}}`).join(',\n');
  const pt=patrolBase.map(p=>`{path:[${p.path.map(q=>`{x:${fmtNum(q.x)},y:${fmtNum(q.y)}}`).join(',')}],speed:${p.speed}}`).join(',\n');
- return `const walls=[\n${w}\n];\n\nconst flowersBase=[\n${fl}\n];\n\nconst patrolBase=[\n${pt}\n];\n\nconst start={x:${fmtNum(start.x)},y:${fmtNum(start.y)}},exit={x:${fmtNum(exit.x)},y:${fmtNum(exit.y)},w:${fmtNum(exit.w)},h:${fmtNum(exit.h)}};;`;
+ return `const walls=[\n${w}\n];\n\nconst flowersBase=[\n${fl}\n];\n\nconst patrolBase=[\n${pt}\n];\n\nconst start={x:${fmtNum(start.x)},y:${fmtNum(start.y)}},exit={x:${fmtNum(exit.x)},y:${fmtNum(exit.y)},w:${fmtNum(exit.w)},h:${fmtNum(exit.h)}};`;
 }
 function toggleDump(){if(dumpEl.style.display==='block'){dumpEl.style.display='none';}else{dumpEl.value=dumpCode();dumpEl.style.display='block';dumpEl.focus();dumpEl.select();}}
 let lastMouse=null;
@@ -141,6 +141,9 @@ function findPath(sx,sy,tx,ty,r=15){
  return[{x:tx,y:ty}];
 }
 function beginReturn(cr){const p=nearestPatrolPoint(cr);cr.state='return';cr.returnIndex=p.index;cr.returnPath=findPath(cr.x,cr.y,p.x,p.y,cr.r+2);cr.returnStep=0;}
+/* 干擾機制：舊版「中央守衛+機關」玩法的殘留，目前未被呼叫。
+   保留以備之後重新設計時參考，重新啟用前需注意 goalDone／creatures[1]
+   （中央守衛、機關）在目前版本已不存在，需要一併補回或改寫。
 function distToPatrol(cr){
  let best=1e9;
  for(let i=0;i<cr.path.length;i++){
@@ -171,6 +174,7 @@ function updateInterference(){
   }
  }
 }
+*/
 function updateCreature(cr,dt){let tx,ty;if(cr.state==='affected'){cr.effectT-=dt;tx=cr.target.x;ty=cr.target.y;if(cr.effectT<=0)beginReturn(cr)}
  if(cr.state==='interfere'){tx=cr.target.x;ty=cr.target.y;}
  if(cr.state==='return'){if(!cr.returnPath||cr.returnStep>=cr.returnPath.length){cr.pi=(cr.returnIndex+1)%cr.path.length;cr.state='patrol'}else{let p=cr.returnPath[cr.returnStep];tx=p.x;ty=p.y;if(Math.hypot(cr.x-tx,cr.y-ty)<7){cr.returnStep++;if(cr.returnStep>=cr.returnPath.length){const h=cr.path[cr.returnIndex];cr.x=h.x;cr.y=h.y;cr.pi=(cr.returnIndex+1)%cr.path.length;cr.state='patrol'}else{p=cr.returnPath[cr.returnStep];tx=p.x;ty=p.y}}}}
