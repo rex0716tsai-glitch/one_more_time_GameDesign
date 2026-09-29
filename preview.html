@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>One More Time — 花與巡邏 Prototype v5</title>
+<style>
+html,body{margin:0;height:100%;background:#101310;color:#eee;font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;overflow:hidden}
+#wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px}
+#hud{width:min(920px,96vw);display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;font-size:14px}
+canvas{background:#20271f;border:1px solid #555;max-width:96vw;max-height:82vh;image-rendering:pixelated}
+kbd{background:#333;border:1px solid #555;border-radius:4px;padding:1px 5px}.red{color:#ff7979}.blue{color:#7da9ff}.white{color:#eee}.good{color:#9be28f}.muted{color:#aaa}
+#dump{display:none;position:fixed;top:8px;left:8px;width:min(640px,90vw);height:320px;z-index:20;background:#111;color:#9be28f;font:12px/1.4 monospace;border:1px solid #6aa86a;padding:8px;white-space:pre;resize:both}
+</style></head>
+<body><div id="wrap"><div id="hud"><div id="status"></div><div id="help"></div></div><canvas id="game" width="920" height="580"></canvas></div><textarea id="dump" readonly spellcheck="false"></textarea>
+<script>
+const c=document.getElementById('game'),ctx=c.getContext('2d'),W=c.width,H=c.height;
+const statusEl=document.getElementById('status'),helpEl=document.getElementById('help'),keys={};
+const dumpEl=document.getElementById('dump');
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();
+ if(document.activeElement===dumpEl){if(k==='escape'||k==='o')toggleDump();return;}
+ keys[k]=true;if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(k))e.preventDefault();
+ if(k==='r')restartAll();
+ if(k==='p'){editMode=!editMode;drag=null;message=editMode?'編輯模式：拖曳圓點移動座標，按 O 匯出、P 離開。':'離開編輯模式。';msgT=2;}
+ if(k==='o'&&editMode)toggleDump();
+});
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+function toCanvas(e){const r=c.getBoundingClientRect();return{x:(e.clientX-r.left)*(W/r.width),y:(e.clientY-r.top)*(H/r.height)};}
+function activeWallIndex(){
+ if(drag&&drag.wallIndex!==undefined)return drag.wallIndex;
+ if(!lastMouse)return -1;
+ let bi=-1,bd=40;
+ walls.forEach((w,i)=>{const d=Math.hypot(w.x+w.w/2-lastMouse.x,w.y+w.h/2-lastMouse.y);if(d<bd){bd=d;bi=i;}});
+ return bi;
+}
+function handles(){const hs=[];
+ const aw=activeWallIndex();
+ walls.forEach((w,i)=>{
+  hs.push({x:w.x+w.w/2,y:w.y+w.h/2,r:6,col:'#8fd1ff',wallIndex:i,set:(nx,ny)=>{w.x=nx-w.w/2;w.y=ny-w.h/2;}});
+  if(i===aw){
+   hs.push({x:w.x,y:w.y,r:5,col:'#fff',wallIndex:i,set:(nx,ny)=>{w.w+=w.x-nx;w.h+=w.y-ny;w.x=nx;w.y=ny;}});
+   hs.push({x:w.x+w.w,y:w.y+w.h,r:5,col:'#fff',wallIndex:i,set:(nx,ny)=>{w.w=nx-w.x;w.h=ny-w.y;}});
+  }
+ });
+ patrolBase.forEach((p,ci)=>p.path.forEach((pt,pi)=>{
+  hs.push({x:pt.x,y:pt.y,r:7,col:'#ffd166',set:(nx,ny)=>{pt.x=nx;pt.y=ny;if(creatures[ci]&&creatures[ci].path[pi]){creatures[ci].path[pi].x=nx;creatures[ci].path[pi].y=ny;}}});
+ }));
+ flowersBase.forEach((f,i)=>{
+  hs.push({x:f.x,y:f.y,r:7,col:f.t==='red'?'#ff7979':f.t==='blue'?'#7da9ff':'#fff',set:(nx,ny)=>{f.x=nx;f.y=ny;if(flowers[i]){flowers[i].x=nx;flowers[i].y=ny;}}});
+ });
+ hs.push({x:start.x,y:start.y,r:7,col:'#9be28f',set:(nx,ny)=>{start.x=nx;start.y=ny;}});
+ hs.push({x:exit.x+exit.w/2,y:exit.y+exit.h/2,r:6,col:'#9be28f',set:(nx,ny)=>{exit.x=nx-exit.w/2;exit.y=ny-exit.h/2;}});
+ hs.push({x:exit.x+exit.w,y:exit.y+exit.h,r:5,col:'#fff',set:(nx,ny)=>{exit.w=nx-exit.x;exit.h=ny-exit.y;}});
+ hs.push({x:goal.x,y:goal.y,r:7,col:'#ebc759',set:(nx,ny)=>{goal.x=nx;goal.y=ny;}});
+ hs.push({x:goal.x+goal.r,y:goal.y,r:5,col:'#fff',set:(nx,ny)=>{goal.r=Math.max(8,nx-goal.x);}});
+ return hs;
+}
+function fmtNum(n){return Math.round(n*100)/100;}
+function dumpCode(){
+ const w=walls.map(o=>`{x:${fmtNum(o.x)},y:${fmtNum(o.y)},w:${fmtNum(o.w)},h:${fmtNum(o.h)}}`).join(',\n');
+ const fl=flowersBase.map(o=>`{x:${fmtNum(o.x)},y:${fmtNum(o.y)},t:'${o.t}'${o.special?',special:true':''}}`).join(',\n');
+ const pt=patrolBase.map(p=>`{path:[${p.path.map(q=>`{x:${fmtNum(q.x)},y:${fmtNum(q.y)}}`).join(',')}],speed:${p.speed}}`).join(',\n');
+ return `const walls=[\n${w}\n];\n\nconst flowersBase=[\n${fl}\n];\n\nconst patrolBase=[\n${pt}\n];\n\nconst start={x:${fmtNum(start.x)},y:${fmtNum(start.y)}},exit={x:${fmtNum(exit.x)},y:${fmtNum(exit.y)},w:${fmtNum(exit.w)},h:${fmtNum(exit.h)}};\n\nconst goal={x:${fmtNum(goal.x)},y:${fmtNum(goal.y)},r:${fmtNum(goal.r)}};`;
+}
+function toggleDump(){if(dumpEl.style.display==='block'){dumpEl.style.display='none';}else{dumpEl.value=dumpCode();dumpEl.style.display='block';dumpEl.focus();dumpEl.select();}}
+let lastMouse=null;
+c.addEventListener('mousedown',e=>{if(!editMode)return;const m=toCanvas(e);lastMouse=m;let best=null,bd=1e9;handles().forEach(h=>{const d=Math.hypot(h.x-m.x,h.y-m.y);if(d<h.r+6&&d<bd){bd=d;best=h;}});drag=best;});
+addEventListener('mousemove',e=>{if(!editMode)return;lastMouse=toCanvas(e);if(drag)drag.set(lastMouse.x,lastMouse.y);});
+addEventListener('mouseup',()=>drag=null);
+const start={x:70,y:510},exit={x:842,y:505,w:48,h:36};
+const WHITE_NEED=4,ABILITY_RADIUS=120,EFFECT_TIME=2.0,GRID=20;
+const walls=[
+{x:0,y:0,w:920,h:25},{x:0,y:555,w:920,h:25},{x:0,y:0,w:25,h:580},{x:895,y:0,w:25,h:580},
+
+// 左側紅花支線：上下都有出口，巡邏生物橫向封鎖取花路線
+{x:170,y:70,w:28,h:135},
+{x:160,y:285,w:28,h:120},
+{x:70,y:205,w:128,h:28},
+
+// 中央牆：形成主路的兩個窄口，但不切斷地圖
+{x:350,y:25,w:30,h:165},
+{x:350,y:260,w:30,h:170},
+{x:350,y:500,w:30,h:55},
+
+// 右側藍花支線：以 L 型牆形成另一種巡邏空間
+{x:590,y:85,w:28,h:155},
+{x:590,y:320,w:28,h:150},
+{x:618,y:240,w:145,h:28},
+
+// 出口前的小型導流牆，保留上下兩條通道
+{x:760,y:390,w:105,h:28}
+];
+const flowersBase=[
+{x:105,y:465,t:'white'},{x:275,y:260,t:'white'},{x:455,y:470,t:'white'},
+{x:500,y:155,t:'white'},{x:690,y:470,t:'white'},{x:810,y:320,t:'white'},
+{x:110,y:120,t:'red',special:true},{x:740,y:145,t:'blue',special:true}
+];
+const patrolBase=[
+// 紅花守衛：玩家必須穿越牠的水平巡邏線才能靠近紅花
+{path:[{x:65,y:85},{x:145,y:85},{x:145,y:175},{x:65,y:175}],speed:80},
+// 中央主路守衛
+{path:[{x:420,y:220},{x:555,y:220},{x:555,y:345},{x:420,y:345}],speed:74},
+// 藍花守衛：垂直/矩形巡邏，控制藍花支線入口
+{path:[{x:650,y:75},{x:825,y:75},{x:825,y:220},{x:650,y:220}],speed:78}
+];
+const goal={x:705,y:440,r:31};
+let round=1,player,flowers,creatures,whiteCount=0,choice=null,ability=null,goalDone=false,finished=false,message='',msgT=0,lastE=false,pulseT=0,editMode=false,drag=null;
+function rectCircle(rect,x,y,r){const nx=Math.max(rect.x,Math.min(x,rect.x+rect.w)),ny=Math.max(rect.y,Math.min(y,rect.y+rect.h));return (x-nx)**2+(y-ny)**2<r*r}
+function blocked(x,y,r){return walls.some(w=>rectCircle(w,x,y,r));}
+function norm(dx,dy){const l=Math.hypot(dx,dy)||1;return[dx/l,dy/l];}
+function resetRound(){
+ player={x:start.x,y:start.y,r:11,speed:178};whiteCount=0;goalDone=false;finished=false;pulseT=0;
+ flowers=flowersBase.map(f=>({...f,taken:false,disabled:round===2&&f.special}));
+ creatures=patrolBase.map(p=>({x:p.path[0].x,y:p.path[0].y,r:13,path:p.path.map(q=>({...q})),pi:1,speed:p.speed,state:'patrol',effectT:0,target:null}));
+ message=round===1?'第一輪：收集 4 朵白花，並在離開前選擇紅花或藍花。':'第二輪：完成收集，並用能力讓一隻生物進入金色圓圈。';msgT=5;
+}
+function restartAll(){round=1;choice=null;ability=null;resetRound();}
+function movePlayer(dx,dy,dt){let l=Math.hypot(dx,dy);if(!l)return;if(l>1){dx/=l;dy/=l;}const nx=player.x+dx*player.speed*dt,ny=player.y+dy*player.speed*dt;if(!blocked(nx,player.y,player.r))player.x=nx;if(!blocked(player.x,ny,player.r))player.y=ny;}
+function nearestPatrolPoint(cr){let b=null,d=1e9;cr.path.forEach((p,i)=>{const nd=Math.hypot(cr.x-p.x,cr.y-p.y);if(nd<d){d=nd;b={...p,index:i}}});return b;}
+function center(cx,cy){return{x:cx*GRID+GRID/2,y:cy*GRID+GRID/2}}
+function valid(cx,cy,r=15){const p=center(cx,cy);return p.x>r&&p.x<W-r&&p.y>r&&p.y<H-r&&!blocked(p.x,p.y,r)}
+function findPath(sx,sy,tx,ty,r=15){
+ const s={x:Math.floor(sx/GRID),y:Math.floor(sy/GRID)},t={x:Math.floor(tx/GRID),y:Math.floor(ty/GRID)},K=(x,y)=>x+','+y;
+ const open=[s],came=new Map(),g=new Map([[K(s.x,s.y),0]]),dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+ while(open.length){let bi=0,bf=1e9;for(let i=0;i<open.length;i++){const n=open[i],f=(g.get(K(n.x,n.y))??1e9)+Math.abs(n.x-t.x)+Math.abs(n.y-t.y);if(f<bf){bf=f;bi=i}}
+ const cur=open.splice(bi,1)[0],ck=K(cur.x,cur.y);if(cur.x===t.x&&cur.y===t.y){let out=[],n=cur,k=ck;while(k!==K(s.x,s.y)){out.push(center(n.x,n.y));const pr=came.get(k);if(!pr)break;n=pr;k=K(n.x,n.y)}out.reverse();out.push({x:tx,y:ty});return out;}
+ for(const[dX,dY]of dirs){const nx=cur.x+dX,ny=cur.y+dY,nk=K(nx,ny);if(!valid(nx,ny,r))continue;const ng=(g.get(ck)??1e9)+1;if(ng<(g.get(nk)??1e9)){came.set(nk,cur);g.set(nk,ng);if(!open.some(n=>n.x===nx&&n.y===ny))open.push({x:nx,y:ny})}}}
+ return[{x:tx,y:ty}];
+}
+function beginReturn(cr){const p=nearestPatrolPoint(cr);cr.state='return';cr.returnIndex=p.index;cr.returnPath=findPath(cr.x,cr.y,p.x,p.y,cr.r+2);cr.returnStep=0;}
+function updateCreature(cr,dt){let tx,ty;if(cr.state==='affected'){cr.effectT-=dt;tx=cr.target.x;ty=cr.target.y;if(cr.effectT<=0)beginReturn(cr)}
+ if(cr.state==='return'){if(!cr.returnPath||cr.returnStep>=cr.returnPath.length){cr.pi=(cr.returnIndex+1)%cr.path.length;cr.state='patrol'}else{let p=cr.returnPath[cr.returnStep];tx=p.x;ty=p.y;if(Math.hypot(cr.x-tx,cr.y-ty)<7){cr.returnStep++;if(cr.returnStep>=cr.returnPath.length){const h=cr.path[cr.returnIndex];cr.x=h.x;cr.y=h.y;cr.pi=(cr.returnIndex+1)%cr.path.length;cr.state='patrol'}else{p=cr.returnPath[cr.returnStep];tx=p.x;ty=p.y}}}}
+ if(cr.state==='patrol'){let p=cr.path[cr.pi];tx=p.x;ty=p.y;if(Math.hypot(cr.x-tx,cr.y-ty)<7){cr.pi=(cr.pi+1)%cr.path.length;p=cr.path[cr.pi];tx=p.x;ty=p.y}}
+ if(tx===undefined)return;const[nx,ny]=norm(tx-cr.x,ty-cr.y),step=cr.speed*dt;if(!blocked(cr.x+nx*step,cr.y,cr.r))cr.x+=nx*step;if(!blocked(cr.x,cr.y+ny*step,cr.r))cr.y+=ny*step;
+}
+function fail(){player.x=start.x;player.y=start.y;message='碰到生物了！回到起點；已完成的收集保留。';msgT=2;}
+function useAbility(){if(round!==2||!ability)return;pulseT=.32;let hit=0;for(const cr of creatures){if(Math.hypot(cr.x-player.x,cr.y-player.y)>ABILITY_RADIUS)continue;hit++;cr.state='affected';cr.effectT=EFFECT_TIME;if(ability==='attract')cr.target={x:player.x,y:player.y};else{const[nx,ny]=norm(cr.x-player.x,cr.y-player.y);cr.target={x:cr.x+nx*120,y:cr.y+ny*120};}}
+ message=hit?(ability==='attract'?`吸引了 ${hit} 隻生物。`:`驅趕了 ${hit} 隻生物。`):'能力範圍內沒有生物。';msgT=1.1;}
+function collectFlowers(){for(const f of flowers){if(f.taken||f.disabled||Math.hypot(player.x-f.x,player.y-f.y)>=22)continue;if(f.t==='white'){f.taken=true;whiteCount++;message=`白花 ${whiteCount}/${WHITE_NEED}`;msgT=.8;}
+ else if(round===1&&!choice){choice=f.t;ability=choice==='red'?'attract':'repel';f.taken=true;flowers.forEach(o=>{if(o.special&&!o.taken)o.disabled=true});message=choice==='red'?'選擇紅花：下一輪獲得「吸引」。':'選擇藍花：下一輪獲得「驅趕」。';msgT=2.5;}}}
+function exitReady(){return round===1?whiteCount>=WHITE_NEED&&!!choice:whiteCount>=WHITE_NEED&&goalDone;}
+function update(dt){if(finished||editMode)return;const dx=(keys.d||keys.arrowright?1:0)-(keys.a||keys.arrowleft?1:0),dy=(keys.s||keys.arrowdown?1:0)-(keys.w||keys.arrowup?1:0);movePlayer(dx,dy,dt);const e=!!keys.e;if(e&&!lastE)useAbility();lastE=e;if(pulseT>0)pulseT-=dt;creatures.forEach(cr=>updateCreature(cr,dt));collectFlowers();
+ if(round===2&&!goalDone){for(const cr of creatures){if(Math.hypot(cr.x-goal.x,cr.y-goal.y)<goal.r-cr.r/3){goalDone=true;message='成功！生物啟動了金色機關。完成白花收集後即可離開。';msgT=3;break;}}}
+ for(const cr of creatures){if(Math.hypot(player.x-cr.x,player.y-cr.y)<player.r+cr.r+2){fail();break;}}
+ if(player.x>exit.x-8&&player.x<exit.x+exit.w+8&&player.y>exit.y-8&&player.y<exit.y+exit.h+8){if(exitReady()){if(round===1){round=2;resetRound();message=`ONE MORE TIME — 你帶走了${choice==='red'?'紅花：吸引':'藍花：驅趕'}。現在試著主動操縱牠們。`;msgT=5}else{finished=true;message='完成！你已經從「躲避生物」變成「操縱生物」。按 R 重玩並選另一朵特殊花。';msgT=999}}else{message=round===1?(whiteCount<WHITE_NEED?`還需要 ${WHITE_NEED-whiteCount} 朵白花。`:'離開前必須選擇紅花或藍花。'):(whiteCount<WHITE_NEED?`還需要 ${WHITE_NEED-whiteCount} 朵白花。`:'還要讓一隻生物進入金色圓圈。');msgT=1.2}}
+ if(msgT>0)msgT-=dt;}
+function circle(x,y,r,fill){ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fillStyle=fill;ctx.fill()}
+function drawFlower(f){if(f.disabled)return;const col=f.t==='red'?'#ed6262':f.t==='blue'?'#6596ed':'#f1f0df';circle(f.x,f.y,f.special?9:7,col);ctx.strokeStyle='#7ba36d';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(f.x,f.y+6);ctx.lineTo(f.x,f.y+16);ctx.stroke();if(f.special){ctx.strokeStyle='rgba(255,255,255,.45)';ctx.lineWidth=1;ctx.beginPath();ctx.arc(f.x,f.y,15,0,Math.PI*2);ctx.stroke()}}
+function draw(){ctx.clearRect(0,0,W,H);ctx.fillStyle='#20271f';ctx.fillRect(0,0,W,H);ctx.fillStyle='#4b5349';walls.forEach(w=>ctx.fillRect(w.x,w.y,w.w,w.h));
+ if(round===2){ctx.beginPath();ctx.arc(goal.x,goal.y,goal.r,0,Math.PI*2);ctx.fillStyle=goalDone?'rgba(155,226,143,.34)':'rgba(235,199,89,.25)';ctx.fill();ctx.strokeStyle=goalDone?'#9be28f':'#ebc759';ctx.lineWidth=3;ctx.stroke();ctx.fillStyle='#eee';ctx.font='12px system-ui';ctx.fillText(goalDone?'已啟動':'生物機關',goal.x-25,goal.y+4)}
+ ctx.fillStyle=exitReady()?'#6aa86a':'#555';ctx.fillRect(exit.x,exit.y,exit.w,exit.h);ctx.fillStyle='#eee';ctx.font='12px system-ui';ctx.fillText('EXIT',exit.x+8,exit.y+23);
+ flowers.filter(f=>!f.taken).forEach(drawFlower);
+ ctx.save();ctx.strokeStyle='rgba(255,255,255,.13)';ctx.setLineDash([5,6]);creatures.forEach(cr=>{ctx.beginPath();cr.path.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.closePath();ctx.stroke()});ctx.restore();
+ if(round===2){ctx.save();ctx.strokeStyle=ability==='attract'?'rgba(255,105,105,.3)':'rgba(105,155,255,.3)';ctx.setLineDash([7,7]);ctx.lineWidth=2;ctx.beginPath();ctx.arc(player.x,player.y,ABILITY_RADIUS,0,Math.PI*2);ctx.stroke();ctx.restore()}
+ if(pulseT>0){ctx.strokeStyle=ability==='attract'?'rgba(255,105,105,.9)':'rgba(105,155,255,.9)';ctx.lineWidth=4;ctx.beginPath();ctx.arc(player.x,player.y,ABILITY_RADIUS,0,Math.PI*2);ctx.stroke()}
+ creatures.forEach(cr=>{circle(cr.x,cr.y,cr.r,cr.state==='affected'?'#f1a866':cr.state==='return'?'#d8d184':'#e5cf69');circle(cr.x-4,cr.y-2,2,'#222');circle(cr.x+4,cr.y-2,2,'#222')});circle(player.x,player.y,player.r,'#f4f4f4');
+ if(editMode){const aw=activeWallIndex();
+  walls.forEach((w,i)=>{ctx.strokeStyle=i===aw?'#ffe27a':'rgba(143,209,255,.55)';ctx.lineWidth=i===aw?3:1.5;ctx.strokeRect(w.x+.5,w.y+.5,w.w-1,w.h-1);});
+  handles().forEach(h=>{ctx.beginPath();ctx.arc(h.x,h.y,h.r,0,Math.PI*2);ctx.globalAlpha=.9;ctx.fillStyle=h.col;ctx.fill();ctx.globalAlpha=1;ctx.strokeStyle='#000';ctx.lineWidth=1;ctx.stroke();});
+  ctx.textAlign='center';ctx.font='bold 11px system-ui';
+  walls.forEach((w,i)=>{ctx.fillStyle='#04210f';ctx.fillText(i,w.x+w.w/2,w.y+w.h/2+4);});
+  ctx.font='9px system-ui';
+  patrolBase.forEach((p,ci)=>p.path.forEach((pt,pi)=>{ctx.fillStyle='#000';ctx.fillText(`${ci}-${pi}`,pt.x,pt.y+3);}));
+  ctx.textAlign='left';
+  ctx.fillStyle='#9be28f';ctx.font='13px system-ui';ctx.fillText('編輯模式 (P 結束／O 匯出)　數字＝牆編號　移到牆中心會亮起並顯示縮放角點',20,45);
+  if(aw>=0){const w=walls[aw];ctx.fillStyle='#ffe27a';ctx.font='12px system-ui';ctx.fillText(`牆 #${aw}　x:${Math.round(w.x)} y:${Math.round(w.y)} w:${Math.round(w.w)} h:${Math.round(w.h)}`,20,64);}
+  if(drag&&lastMouse){ctx.fillStyle='#fff';ctx.font='12px system-ui';ctx.fillText(`${Math.round(lastMouse.x)}, ${Math.round(lastMouse.y)}`,lastMouse.x+10,lastMouse.y-10);}
+ }
+ if(msgT>0){ctx.fillStyle='rgba(0,0,0,.72)';ctx.fillRect(115,12,690,44);ctx.fillStyle='#fff';ctx.textAlign='center';ctx.font='16px system-ui';ctx.fillText(message,460,40);ctx.textAlign='left'}
+ const pick=choice?(choice==='red'?'<span class="red">紅花／吸引</span>':'<span class="blue">藍花／驅趕</span>'):'尚未選擇';statusEl.innerHTML=`第 <b>${round}</b> 輪　<span class="white">白花 ${whiteCount}/${WHITE_NEED}</span>　特殊花：${pick}${round===2?`　機關：${goalDone?'<span class="good">完成</span>':'未完成'}`:''}`;helpEl.innerHTML=`<kbd>WASD</kbd> 移動　${round===2?'<kbd>E</kbd> 能力　':''}<kbd>R</kbd> 全部重來　<kbd>P</kbd> 編輯座標`;
+}
+let last=performance.now();function loop(t){const dt=Math.min(.033,(t-last)/1000);last=t;update(dt);draw();requestAnimationFrame(loop)}resetRound();requestAnimationFrame(loop);
+</script></body></html>
